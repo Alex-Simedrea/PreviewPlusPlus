@@ -14,6 +14,7 @@ final class PDFViewerModel: ObservableObject {
     @Published private(set) var document: PDFDocument?
     @Published private(set) var loadState: LoadState = .loading
     @Published private(set) var currentPageIndex = 0
+    @Published private(set) var readingAppearance: PDFReadingAppearance?
 
     let pdfView = PDFView()
     let displayName: String
@@ -113,6 +114,15 @@ final class PDFViewerModel: ObservableObject {
         currentPageIndex = index
         pdfView.go(to: page)
         capture(from: pdfView)
+    }
+
+    func updateReadingAppearance(_ appearance: PDFReadingAppearance) {
+        if readingAppearance != appearance {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.readingAppearance != appearance else { return }
+                self.readingAppearance = appearance
+            }
+        }
     }
 
     private func saveLatestState() async {

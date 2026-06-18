@@ -1,3 +1,4 @@
+import Darwin
 import PDFKit
 import SwiftUI
 import UIKit
@@ -123,7 +124,9 @@ struct PDFKitView: UIViewRepresentable {
             pdfView.backgroundColor = .systemBackground
             pdfView.documentView?.backgroundColor = .clear
             pdfView.documentView?.layer.filters = nil
-            if pdfView.applyPrivateReadingAppearance(isDark: colorScheme == .dark, lastSignature: &lastReadingAppearanceSignature) {
+            let result = pdfView.applyPrivateReadingAppearance(isDark: colorScheme == .dark, lastSignature: &lastReadingAppearanceSignature)
+            model?.updateReadingAppearance(result.appearance)
+            if result.didChange {
                 pdfView.invalidateRenderedPages()
             }
         }
@@ -185,16 +188,33 @@ struct PDFKitView: UIViewRepresentable {
 }
 
 struct PDFThumbnailSidebarView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: PDFViewerModel
+    @StateObject private var thumbnailStore = PDFThumbnailStore()
+    
+    private var readingAppearance: PDFReadingAppearance {
+        model.readingAppearance ?? model.pdfView.readingAppearance(isDark: colorScheme == .dark)
+    }
     
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(0..<(model.document?.pageCount ?? 0), id: \.self) { index in
-                    PDFPageThumbnailView(model: model, pageIndex: index)
+                    PDFPageThumbnailView(
+                        model: model,
+                        pageIndex: index,
+                        thumbnail: thumbnailStore.image(
+                            for: index,
+                            document: model.document,
+                            appearance: readingAppearance
+                        )
+                    )
                 }
             }
             .padding(.vertical, 8)
+        }
+        .task(id: PDFThumbnailRenderRequest(document: model.document, appearance: readingAppearance)) {
+            await thumbnailStore.render(document: model.document, appearance: readingAppearance)
         }
     }
 }
@@ -202,7 +222,7 @@ struct PDFThumbnailSidebarView: View {
 private struct PDFPageThumbnailView: View {
     @ObservedObject var model: PDFViewerModel
     let pageIndex: Int
-    @State private var thumbnail: UIImage?
+    let thumbnail: UIImage?
     
     private var isSelected: Bool {
         model.currentPageIndex == pageIndex
@@ -233,13 +253,154 @@ private struct PDFPageThumbnailView: View {
             .shadow(color: .black.opacity(0.14), radius: 1.5, x: 0, y: 1)
         }
         .buttonStyle(.plain)
-        .task(id: pageIndex) {
-            guard thumbnail == nil, let page = model.document?.page(at: pageIndex) else { return }
-            thumbnail = page.thumbnail(of: CGSize(width: 152, height: 208), for: .cropBox)
+    }
+}
+
+private struct PDFThumbnailRenderRequest: Equatable {
+    var documentID: ObjectIdentifier?
+    var pageCount: Int
+    var renderSignature: String
+    
+    init(document: PDFDocument?, appearance: PDFReadingAppearance) {
+        documentID = document.map(ObjectIdentifier.init)
+        pageCount = document?.pageCount ?? 0
+        renderSignature = appearance.renderSignature
+    }
+}
+
+private struct PDFThumbnailCacheKey: Hashable {
+    var documentID: ObjectIdentifier
+    var pageIndex: Int
+    var renderSignature: String
+}
+
+@MainActor
+private final class PDFThumbnailStore: ObservableObject {
+    @Published private var thumbnails: [PDFThumbnailCacheKey: UIImage] = [:]
+    private var documentID: ObjectIdentifier?
+    
+    func image(for pageIndex: Int, document: PDFDocument?, appearance: PDFReadingAppearance) -> UIImage? {
+        guard let document else { return nil }
+        let documentID = ObjectIdentifier(document)
+        let key = PDFThumbnailCacheKey(documentID: documentID, pageIndex: pageIndex, renderSignature: appearance.renderSignature)
+        return thumbnails[key]
+    }
+    
+    func render(document: PDFDocument?, appearance: PDFReadingAppearance) async {
+        guard let document else {
+            documentID = nil
+            thumbnails = [:]
+            return
+        }
+        
+        let currentDocumentID = ObjectIdentifier(document)
+        if documentID != currentDocumentID {
+            documentID = currentDocumentID
+            thumbnails = [:]
+        }
+        
+        let size = CGSize(width: 152, height: 208)
+        var renderedThumbnails: [PDFThumbnailCacheKey: UIImage] = [:]
+        
+        for pageIndex in 0..<document.pageCount {
+            let key = PDFThumbnailCacheKey(documentID: currentDocumentID, pageIndex: pageIndex, renderSignature: appearance.renderSignature)
+            guard thumbnails[key] == nil else { continue }
+            guard let page = document.page(at: pageIndex) else { continue }
+            guard !Task.isCancelled else { return }
+            
+            renderedThumbnails[key] = autoreleasepool {
+                page.thumbnail(of: size, for: .cropBox, appearance: appearance)
+            }
+            
+            if pageIndex.isMultiple(of: 8) {
+                await Task.yield()
+            }
+            guard !Task.isCancelled else { return }
+        }
+        
+        guard !Task.isCancelled else { return }
+        var nextThumbnails = thumbnails.filter { key, _ in
+            key.documentID != currentDocumentID || key.renderSignature == appearance.renderSignature
+        }
+        nextThumbnails.merge(renderedThumbnails) { _, new in new }
+        
+        if nextThumbnails.count != thumbnails.count || !renderedThumbnails.isEmpty {
+            thumbnails = nextThumbnails
         }
     }
 }
 
+private extension PDFPage {
+    func thumbnail(of size: CGSize, for box: PDFDisplayBox, appearance: PDFReadingAppearance) -> UIImage {
+        guard appearance.isDark else { return thumbnail(of: size, for: box) }
+        return privateDarkModeThumbnail(of: size, for: box, backgroundColor: appearance.backgroundColor) ?? thumbnail(of: size, for: box)
+    }
+    
+    func privateDarkModeThumbnail(of size: CGSize, for box: PDFDisplayBox, backgroundColor: UIColor) -> UIImage? {
+        let selector = NSSelectorFromString("imageOfSize:forBox:withOptions:")
+        guard
+            responds(to: selector),
+            let implementation = method(for: selector),
+            let options = PrivatePDFPageImageOptions.darkModeOptions(backgroundColor: backgroundColor)
+        else {
+            return nil
+        }
+        
+        typealias Function = @convention(c) (AnyObject, Selector, CGSize, Int, NSDictionary) -> UIImage?
+        return unsafeBitCast(implementation, to: Function.self)(self, selector, size, box.rawValue, options)
+    }
+}
+
+private enum PrivatePDFPageImageOptions {
+    nonisolated(unsafe) private static let handle = dlopen("/System/Library/Frameworks/PDFKit.framework/PDFKit", RTLD_LAZY) ?? dlopen(nil, RTLD_LAZY)
+    
+    nonisolated(unsafe) private static let darkModeRenderingKey = pdfKitString(named: "PDFPageImageProperty_DarkModeRendering")
+    nonisolated(unsafe) private static let backgroundColorKey = pdfKitString(named: "PDFPageImageProperty_BackgroundColor")
+    nonisolated(unsafe) private static let drawAnnotationsKey = pdfKitString(named: "PDFPageImageProperty_DrawAnnotations")
+    nonisolated(unsafe) private static let withRotationKey = pdfKitString(named: "PDFPageImageProperty_WithRotation")
+    
+    static func darkModeOptions(backgroundColor: UIColor) -> NSDictionary? {
+        guard let darkModeRenderingKey else { return nil }
+        
+        let options = NSMutableDictionary()
+        options[darkModeRenderingKey] = NSNumber(value: true)
+        
+        if let backgroundColorKey {
+            options[backgroundColorKey] = backgroundColor
+        }
+        if let drawAnnotationsKey {
+            options[drawAnnotationsKey] = NSNumber(value: true)
+        }
+        if let withRotationKey {
+            options[withRotationKey] = NSNumber(value: true)
+        }
+        
+        return options
+    }
+    
+    private static func pdfKitString(named name: String) -> NSString? {
+        guard let handle, let symbol = dlsym(handle, name) else { return nil }
+        return symbol.assumingMemoryBound(to: NSString.self).pointee
+    }
+}
+
+
+struct PDFReadingAppearance: Hashable {
+    var isDark: Bool
+    var signature: String
+    var renderSignature: String
+    var backgroundColor: UIColor
+    var traits: UITraitCollection
+    
+    static func == (lhs: PDFReadingAppearance, rhs: PDFReadingAppearance) -> Bool {
+        lhs.signature == rhs.signature && lhs.renderSignature == rhs.renderSignature
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(signature)
+        hasher.combine(renderSignature)
+    }
+}
 
 private extension PDFView {
     func applyScrollEdgeEffect() {
@@ -249,33 +410,45 @@ private extension PDFView {
         scrollView.bottomEdgeEffect.style = .automatic
     }
     
-    func applyPrivateReadingAppearance(isDark: Bool, lastSignature: inout String?) -> Bool {
-        let traits = effectivePDFRenderingTraitCollection(isDark: isDark)
-        let pageBackgroundColor = resolvedPDFPageBackgroundColor(with: traits)
-        let signature = readingAppearanceSignature(isDark: isDark, color: pageBackgroundColor, traits: traits)
-        if lastSignature == signature {
-            return false
+    func applyPrivateReadingAppearance(isDark: Bool, lastSignature: inout String?) -> (didChange: Bool, appearance: PDFReadingAppearance) {
+        let appearance = readingAppearance(isDark: isDark)
+        if lastSignature == appearance.renderSignature {
+            return (false, appearance)
         }
-        lastSignature = signature
+        lastSignature = appearance.renderSignature
         
         privateSetBool("setAllowsDarkAppearanceContent:", isDark)
-        privateSetObject("setDarkModeBackgroundColor:", pageBackgroundColor)
-        privateSetObject("setPageColor:", pageBackgroundColor)
+        privateSetObject("setDarkModeBackgroundColor:", appearance.backgroundColor)
+        privateSetObject("setPageColor:", appearance.backgroundColor)
         privateSetBool("enableBackgroundImages:", true)
         
-        guard let renderingProperties = privateObject("renderingProperties") as? NSObject else { return true }
-        renderingProperties.privateSetObject("setTraitCollection:", traits)
-        renderingProperties.privateSetInteger("setAppearanceStyle:", traits.userInterfaceStyle.rawValue)
-        renderingProperties.privateSetObject("setDarkModePageBackgroundColor:", pageBackgroundColor)
-        renderingProperties.privateSetObject("setPageColor:", pageBackgroundColor)
+        guard let renderingProperties = privateObject("renderingProperties") as? NSObject else { return (true, appearance) }
+        renderingProperties.privateSetObject("setTraitCollection:", appearance.traits)
+        renderingProperties.privateSetInteger("setAppearanceStyle:", appearance.traits.userInterfaceStyle.rawValue)
+        renderingProperties.privateSetObject("setDarkModePageBackgroundColor:", appearance.backgroundColor)
+        renderingProperties.privateSetObject("setPageColor:", appearance.backgroundColor)
         renderingProperties.privateSetBool("setEnableBackgroundImages:", true)
         renderingProperties.privateSetBool("setEnableTileUpdates:", true)
         
         document?.privateSetObject("setRenderingProperties:", renderingProperties)
-        return true
+        return (true, appearance)
     }
     
-    func readingAppearanceSignature(isDark: Bool, color: UIColor, traits: UITraitCollection) -> String {
+    func readingAppearance(isDark: Bool) -> PDFReadingAppearance {
+        let traits = effectivePDFRenderingTraitCollection(isDark: isDark)
+        let pageBackgroundColor = resolvedPDFPageBackgroundColor(with: traits)
+        let renderSignature = readingAppearanceRenderSignature(isDark: isDark, color: pageBackgroundColor, traits: traits)
+        let signature = readingAppearanceSignature(isDark: isDark, color: pageBackgroundColor, traits: traits)
+        return PDFReadingAppearance(
+            isDark: isDark,
+            signature: signature,
+            renderSignature: renderSignature,
+            backgroundColor: pageBackgroundColor,
+            traits: traits
+        )
+    }
+    
+    func readingAppearanceRenderSignature(isDark: Bool, color: UIColor, traits: UITraitCollection) -> String {
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
@@ -289,7 +462,13 @@ private extension PDFView {
             String(format: "%.4f", alpha),
             "style=\(traits.userInterfaceStyle.rawValue)",
             "level=\(traits.userInterfaceLevel.rawValue)",
-            "scale=\(traits.displayScale)",
+            "scale=\(traits.displayScale)"
+        ].joined(separator: "|")
+    }
+    
+    func readingAppearanceSignature(isDark: Bool, color: UIColor, traits: UITraitCollection) -> String {
+        [
+            readingAppearanceRenderSignature(isDark: isDark, color: color, traits: traits),
             "bounds=\(Int(bounds.width))x\(Int(bounds.height))",
             "window=\(Int(window?.bounds.width ?? 0))x\(Int(window?.bounds.height ?? 0))"
         ].joined(separator: "|")
