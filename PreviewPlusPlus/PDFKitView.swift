@@ -198,7 +198,7 @@ struct PDFThumbnailSidebarView: View {
     
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 8) {
+            LazyVStack(spacing: 12) {
                 ForEach(0..<(model.document?.pageCount ?? 0), id: \.self) { index in
                     PDFPageThumbnailView(
                         model: model,
@@ -233,7 +233,7 @@ private struct PDFPageThumbnailView: View {
             model.goToPage(at: pageIndex)
         } label: {
             ZStack {
-                RoundedRectangle(cornerRadius: 3)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(Color(uiColor: .systemBackground))
                 
                 if let thumbnail {
@@ -243,14 +243,18 @@ private struct PDFPageThumbnailView: View {
                 } else {
                     ProgressView()
                         .controlSize(.small)
+                        .frame(height: 100)
                 }
             }
-            .frame(width: 76, height: 104)
+            .clipShape(.rect(cornerRadius: 8))
+            .frame(width: 100)
             .overlay {
-                RoundedRectangle(cornerRadius: 3)
-                    .stroke(isSelected ? Color.accentColor : Color(uiColor: .separator).opacity(0.35), lineWidth: isSelected ? 2 : 0.5)
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8)
+                        .background(Color.gray.opacity(0.25))
+                        .clipShape(.rect(cornerRadius: 8))
+                }
             }
-            .shadow(color: .black.opacity(0.14), radius: 1.5, x: 0, y: 1)
         }
         .buttonStyle(.plain)
     }
@@ -352,12 +356,12 @@ private extension PDFPage {
 }
 
 private enum PrivatePDFPageImageOptions {
-    nonisolated(unsafe) private static let handle = dlopen("/System/Library/Frameworks/PDFKit.framework/PDFKit", RTLD_LAZY) ?? dlopen(nil, RTLD_LAZY)
+    private nonisolated(unsafe) static let handle = dlopen("/System/Library/Frameworks/PDFKit.framework/PDFKit", RTLD_LAZY) ?? dlopen(nil, RTLD_LAZY)
     
-    nonisolated(unsafe) private static let darkModeRenderingKey = pdfKitString(named: "PDFPageImageProperty_DarkModeRendering")
-    nonisolated(unsafe) private static let backgroundColorKey = pdfKitString(named: "PDFPageImageProperty_BackgroundColor")
-    nonisolated(unsafe) private static let drawAnnotationsKey = pdfKitString(named: "PDFPageImageProperty_DrawAnnotations")
-    nonisolated(unsafe) private static let withRotationKey = pdfKitString(named: "PDFPageImageProperty_WithRotation")
+    private nonisolated(unsafe) static let darkModeRenderingKey = pdfKitString(named: "PDFPageImageProperty_DarkModeRendering")
+    private nonisolated(unsafe) static let backgroundColorKey = pdfKitString(named: "PDFPageImageProperty_BackgroundColor")
+    private nonisolated(unsafe) static let drawAnnotationsKey = pdfKitString(named: "PDFPageImageProperty_DrawAnnotations")
+    private nonisolated(unsafe) static let withRotationKey = pdfKitString(named: "PDFPageImageProperty_WithRotation")
     
     static func darkModeOptions(backgroundColor: UIColor) -> NSDictionary? {
         guard let darkModeRenderingKey else { return nil }
@@ -383,7 +387,6 @@ private enum PrivatePDFPageImageOptions {
         return symbol.assumingMemoryBound(to: NSString.self).pointee
     }
 }
-
 
 struct PDFReadingAppearance: Hashable {
     var isDark: Bool
@@ -572,7 +575,6 @@ private extension PDFView {
         scrollView.setContentOffset(targetOffset, animated: false)
         return true
     }
-    
 }
 
 private extension NSObject {

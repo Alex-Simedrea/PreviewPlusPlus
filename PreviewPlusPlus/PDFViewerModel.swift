@@ -110,10 +110,12 @@ final class PDFViewerModel: ObservableObject {
     }
 
     func goToPage(at index: Int) {
-        guard let document, let page = document.page(at: index) else { return }
-        currentPageIndex = index
-        pdfView.go(to: page)
-        capture(from: pdfView)
+        withAnimation(.none) {
+            guard let document, let page = document.page(at: index) else { return }
+            currentPageIndex = index
+            pdfView.go(to: page)
+            capture(from: pdfView)
+        }
     }
 
     func updateReadingAppearance(_ appearance: PDFReadingAppearance) {

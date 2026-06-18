@@ -37,8 +37,8 @@ struct PDFDocumentView: View {
         case .loaded:
             NavigationSplitView(columnVisibility: $columnVisibility) {
                 PDFThumbnailSidebarView(model: model)
-                    .background(SplitViewWidthConfigurator(width: 112))
-                    .navigationSplitViewColumnWidth(min: 112, ideal: 112, max: 112)
+                    .background(SplitViewWidthConfigurator(width: 130))
+                    .navigationSplitViewColumnWidth(min: 130, ideal: 130, max: 130)
             } detail: {
                 PDFKitView(model: model)
                     .ignoresSafeArea(.container, edges: .top)
